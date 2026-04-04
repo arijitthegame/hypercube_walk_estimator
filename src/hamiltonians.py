@@ -68,5 +68,69 @@ def hamiltonian_TFIM_1D_ring(n, J, Gamma):
         diag[x] = -J * energy
     return np.diag(diag) - Gamma * adjacency_hypercube(n)
 
+#################################################################
+### General Transverse Ising Models #######################
+
+# Pauli matrices
+I = np.array([[1, 0], [0, 1]], dtype=np.float64)
+X = np.array([[0, 1], [1, 0]], dtype=np.float64)
+Z = np.array([[1, 0], [0, -1]], dtype=np.float64)
+
+
+def kron_n(ops):
+    """Kronecker product of a list of matrices."""
+    result = ops[0]
+    for op in ops[1:]:
+        result = np.kron(result, op)
+    return result
+
+
+def local_operator(n, site, op):
+    """
+    Construct operator acting on 'site' (0-indexed) in n-spin system.
+    """
+    ops = [I] * n
+    ops[site] = op
+    return kron_n(ops)
+
+
+def two_site_operator(n, i, j, op_i, op_j):
+    """
+    Construct operator acting on sites i and j.
+    """
+    ops = [I] * n
+    ops[i] = op_i
+    ops[j] = op_j
+    return kron_n(ops)
+
+
+def transverse_ising_hamiltonian(n, J, h):
+    """
+    Construct H = - sum_{i<j} J[i,j] Z_i Z_j - sum_i h[i] X_i
+
+    Parameters:
+    - n: number of spins
+    - J: (n x n) symmetric coupling matrix
+    - h: (n,) transverse field vector
+    """
+    dim = 2**n
+    H = np.zeros((dim, dim), dtype=np.float64)
+
+    # Interaction term: Z_i Z_j
+    for i in range(n):
+        for j in range(i + 1, n):
+            if J[i, j] != 0:
+                H -= J[i, j] * two_site_operator(n, i, j, Z, Z)
+
+    # Transverse field: X_i
+    for i in range(n):
+        if h[i] != 0:
+            H -= h[i] * local_operator(n, i, X)
+
+    return H
+
+
+
+
 
 
