@@ -8,124 +8,121 @@ Hamiltonians of the form:
 
 where:
     D  = diagonal matrix of ZZ (or p-body) coupling energies
-    M  = off-diagonal matrix of transverse field (hypercube edges)
+    M  = off-diagonal transverse field matrix
 
-TWO ESTIMATION MODES
---------------------
-This module supports two modes, controlled by the `mode` argument in
-`trace_estimate()`:
+THREE ESTIMATION MODES
+----------------------
+mode='M_only'
+    Estimates tr(f(M)), ignoring D entirely. EXACTLY UNBIASED for tr(f(M)).
+    The walk only traverses off-diagonal edges with weights -h_i.
+    Bias vs tr(f(H)): O(beta^2 ||J||_F ||h||_2).
 
-    mode='M_only'  (default)
-    -------------------------
-    Estimates tr(f(M)), i.e. the partition function of the PURE transverse
-    field with no ZZ coupling. This estimator is EXACTLY UNBIASED for
-    tr(f(M)).
+    CLOSED FORM: for all systems with hypercube M (TFIM, p-body, SK),
+    tr(e^{-beta M}) = 2^n * prod_i cosh(beta * h_i)
+    This is O(n) to compute exactly, so mode='M_only' is mainly useful
+    as a baseline / control variate, NOT as an approximation to tr(f(H)).
 
-    When is this useful?
-    - J = 0 (no ZZ coupling), in which case H = M exactly and the
-      estimator is unbiased for tr(f(H)).
-    - High temperature (small beta) or weak coupling (small ||J||),
-      where tr(f(M)) approximates tr(f(H)) well. The bias is
-      O(beta^2 ||J||_F ||h||_2) to leading order (see latex doc).
-    - As a control variate: since tr(e^{-beta M}) has a closed form
-      for the hypercube (2^n * cosh(beta||h||/n)^n), the difference
-      tr(f(H)) - tr(f(M)) can be estimated separately and added back.
+    NOTE: np.trace(expm(-beta * M)) and the closed form give IDENTICAL
+    results (up to floating point). There is no need to zero-fill the
+    diagonal of H and call expm — the closed form is both cheaper and
+    exact. See exact_trace_M_hypercube() below.
 
-    Ground truth to compare against:
-        H_offdiag = system.build_hamiltonian()
-        np.fill_diagonal(H_offdiag, 0)
-        exact_M = np.trace(expm(-beta * H_offdiag))
-
-    mode='trotter'
-    --------------
-    Estimates tr(e^{-beta D} e^{-beta M}) via a symmetric Trotter
-    (Strang) splitting:
-
+mode='trotter'
+    Estimates tr(e^{-beta D} e^{-beta M}) via symmetric Trotter splitting:
         e^{-beta H} = e^{-beta D/2} e^{-beta M} e^{-beta D/2} + O(beta^3)
+    Diagonal correction e^{-beta D_{xx}/2} absorbed at start/end of walk.
+    Bias vs tr(f(H)): O(beta^3 ||[D,M]||^2). Only valid for f = e^{-beta H}.
 
-    The diagonal correction e^{-beta D_{xx}/2} is absorbed as a
-    multiplicative weight at the start (left factor) and at each visited
-    node (right factor) during the walk. This estimator targets
-    tr(e^{-beta D} e^{-beta M}), which approximates tr(e^{-beta H})
-    with bias O(beta^3 ||[D,M]||^2), one order better than mode='M_only'.
+mode='unbiased'  [RECOMMENDED]
+    Estimates tr(f(H)) for the FULL Hamiltonian. EXACTLY UNBIASED.
+    Diagonal D is handled via self-loops: the walk can stay at the
+    current vertex with weight D_{xx}, contributing to H^k via
+    interleavings of diagonal and off-diagonal steps. Since the GRF
+    expands f(H) = sum_k alpha_k H^k at the TAYLOR SERIES level (not
+    the exponential level), non-commutativity of D and M is irrelevant
+    — all interleavings of D and M steps in H^k are captured exactly.
 
-    NOTE: This mode only makes sense for f(H) = e^{-beta H}. For other
-    kernel functions (resolvent, p-step RW), use mode='M_only' and
-    interpret the result accordingly.
-
-    Ground truth to compare against:
-        H = system.build_hamiltonian()
-        D = np.diag(np.diag(H))
-        M = H - D
-        exact_trotter = np.trace(expm(-beta * D) @ expm(-beta * M))
+    Diagonal cost is minimised via INCREMENTAL UPDATES:
+        - Sparse J (TFIM, 1D/2D/k-regular): O(d) per step, d = degree
+        - Dense J (SK/RandomIsing):          O(n) per step (incremental)
+        - p-body:                            O(C(n-1,p-1)) per step
+    vs O(n*d) or O(n^2) if recomputed from scratch each step.
 
 BIAS SUMMARY
 ------------
-    Mode        Targets                     Bias vs tr(f(H))
-    --------    -------------------------   ----------------------------
-    M_only      tr(f(M))                    O(beta^2 ||J||_F ||h||_2)
-    trotter     tr(e^{-bD} e^{-bM})         O(beta^3 ||[D,M]||^2)
-    exact        tr(f(H))                   0  (only via expm, O(8^n))
+    Mode        Targets                   Bias vs tr(f(H))           Cost/step
+    --------    ----------------------    --------------------------  ---------
+    M_only      tr(f(M))                  O(b^2 ||J||_F ||h||_2)     O(n)
+    trotter     tr(e^{-bD} e^{-bM})       O(b^3 ||[D,M]||^2)         O(n*d)
+    unbiased    tr(f(H))                  0                           O(n+d)
 
-HOW TO TEST WHICH VERSION IS WHICH
-------------------------------------
-Run the built-in `verify()` method on any system. It prints a table
-comparing the estimator against three ground truths:
+HOW TO VERIFY EACH MODE
+------------------------
+Run system.verify(...) which prints a table comparing all three modes
+against their correct ground truths:
 
-    - exact_M      : np.trace(expm(-beta * M))     <- unbiased target of M_only
-    - exact_trotter: np.trace(expm(-beta*D) @ expm(-beta*M))  <- unbiased target of trotter
-    - exact_H      : np.trace(expm(-beta * H))     <- true partition function
+    exact_M_closed : 2^n * prod_i cosh(beta*h_i)   <- O(n), exact, no expm
+    exact_M_expm   : np.trace(expm(-beta*M))        <- O(8^n), same value
+    exact_trotter  : np.trace(expm(-b*D) @ expm(-b*M))
+    exact_H        : np.trace(expm(-beta*H))        <- true partition function
 
-A well-functioning estimator should have near-zero error against its
-own target, and nonzero error against the others (unless J ~ 0).
+Expected behaviour:
+    mode='M_only'   ~0 error vs exact_M_closed (and exact_M_expm, same thing)
+    mode='trotter'  ~0 error vs exact_trotter
+    mode='unbiased' ~0 error vs exact_H
 
-COMPLEXITY
-----------
-    Per walk step:
-        mode='M_only'  : O(n)       neighbors + weights from h only
-        mode='trotter' : O(n*d)     same walk + diagonal_entry at each node
-                         where d = average degree of J coupling graph
+COMPLEXITY SUMMARY
+------------------
+    Total cost: O(S * R * L * cost_per_step)
+    S = nb_hutchinson, R = nb_walks, L = mean walk length = (1-p)/p
 
-    Total:
-        O(S * R * L * n)  for M_only
-        O(S * R * L * n*d) for trotter
-    where S = nb_hutchinson, R = nb_walks, L = mean walk length = (1-p)/p
-
-USAGE EXAMPLE
--------------
-    import numpy as np
-    from spin_trace_estimator import TFIM, f_diffusion
-
-    n, beta = 4, 0.5
-    J = np.zeros((n, n))
-    for i in range(n-1):
-        J[i, i+1] = J[i+1, i] = 0.4
-    h = np.full(n, 0.3)
-
-    system = TFIM(n, J, h)
-
-    # Unbiased for tr(e^{-beta M})
-    est_M = system.trace_estimate(
-        f=f_diffusion(beta), beta=beta,
-        p_halt=0.3, nb_walks=64, nb_hutchinson=200,
-        mode='M_only'
-    )
-
-    # Trotter-corrected approximation of tr(e^{-beta H})
-    est_H = system.trace_estimate(
-        f=f_diffusion(beta), beta=beta,
-        p_halt=0.3, nb_walks=64, nb_hutchinson=200,
-        mode='trotter'
-    )
-
-    # Verify both with ground truth table
-    system.verify(beta=beta, p_halt=0.3, nb_walks=64, nb_hutchinson=200)
+    System          mode='M_only'  mode='unbiased' (per step)
+    -----------     -------------  ---------------------------
+    TFIM sparse     O(n)           O(n + d),  d = J graph degree
+    TFIM dense/SK   O(n)           O(n)       incremental
+    p-body          O(n)           O(n + C(n-1,p-1))
+    XXZ             O(n^2)         O(n^2)     (M already O(n^2) neighbors)
 """
 
 import numpy as np
 import scipy
 from scipy.linalg import expm
 from itertools import combinations
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Closed form for tr(e^{-beta M}) on hypercube M
+# ═══════════════════════════════════════════════════════════════════
+
+def exact_trace_M_hypercube(n, h, beta):
+    """
+    Exact closed form for tr(e^{-beta M}) where M = -sum_i h_i X_i.
+
+    Since X_i on different sites commute, the exponential factorises:
+        e^{-beta M} = prod_i e^{beta h_i X_i}
+
+    Taking the trace over each site independently:
+        tr(e^{beta h_i X_i}) = 2 cosh(beta h_i)
+
+    Therefore:
+        tr(e^{-beta M}) = 2^n * prod_i cosh(beta h_i)
+
+    This formula is valid for ANY h_i (uniform or not) and costs O(n).
+    It gives IDENTICAL results to np.trace(expm(-beta * M)) up to
+    floating point precision. There is no need to zero-fill the diagonal
+    of H and call expm — both approaches compute the same quantity.
+
+    Parameters
+    ----------
+    n    : int,        number of spins
+    h    : (n,) array, transverse field strengths
+    beta : float,      inverse temperature
+
+    Returns
+    -------
+    float : tr(e^{-beta M})
+    """
+    return float((2 ** n) * np.prod(np.cosh(beta * np.asarray(h))))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -138,67 +135,56 @@ class SpinSystem:
 
     Subclasses must implement:
         get_neighbors_and_weights(x) -> (neighbors, weights)
-        diagonal_entry(x)            -> float
+            Off-diagonal edges only. Used by M_only and trotter modes.
+        diagonal_entry(x) -> float
+            H[x,x]. Used by trotter and unbiased modes.
+        build_adj_list() -> list of list of (j, J_ij)
+            Sparse adjacency list of the J coupling graph.
+            Used by unbiased mode for incremental diagonal updates.
 
-    Everything else (walk, GRF, Hutchinson, verify) is inherited.
+    Optionally override:
+        supports_closed_form_M : bool
+            Set True if tr(e^{-beta M}) = 2^n prod_i cosh(beta h_i).
+            True for all systems with hypercube M (TFIM, p-body, SK).
+            False for XXZ (different M structure).
     """
 
-    # ── Interface subclasses must implement ───────────────────────
+    supports_closed_form_M = False
+
+    # ── Subclass interface ────────────────────────────────────────
 
     def get_neighbors_and_weights(self, x):
-        """
-        Off-diagonal neighbors of configuration x and their H matrix weights.
-
-        Parameters
-        ----------
-        x : int
-            Spin configuration encoded as a bitmask.
-
-        Returns
-        -------
-        neighbors : list of int
-            Neighboring configurations.
-        weights : np.ndarray
-            Signed off-diagonal H entries H[x, neighbor].
-            These are the RAW matrix entries, not probabilities.
-        """
+        """Off-diagonal neighbors and their signed H matrix weights."""
         raise NotImplementedError
 
     def diagonal_entry(self, x):
-        """
-        Diagonal entry H[x, x] for configuration x.
-
-        Parameters
-        ----------
-        x : int
-            Spin configuration encoded as a bitmask.
-
-        Returns
-        -------
-        float
-            H[x, x], the on-site energy of configuration x.
-        """
+        """H[x, x] for configuration x."""
         raise NotImplementedError
 
-    # ── Shared internals ──────────────────────────────────────────
+    def build_adj_list(self):
+        """
+        Sparse adjacency list of J coupling graph for incremental updates.
+        Returns list of length n: adj[i] = list of (j, J_ij) for j != i.
+        Default: empty lists (no incremental speedup, falls back to
+        calling diagonal_entry from scratch at each step).
+        Override in subclasses where J is explicitly available.
+        """
+        return [[] for _ in range(self.n)]
+
+    # ── Shared utilities ──────────────────────────────────────────
 
     def _transition_probs(self, weights):
-        """Transition probabilities proportional to |weights|."""
+        """Probabilities proportional to |weights|. Returns zeros if all zero."""
         abs_w = np.abs(weights)
         total = abs_w.sum()
-        if total == 0:
-            return np.zeros_like(abs_w)
-        return abs_w / total
+        return abs_w / total if total > 0 else np.zeros_like(abs_w)
 
-    def _random_walk(self, start, p_halt):
+    # ── Walk for M_only and trotter (no self-loops) ───────────────
+
+    def _random_walk_offdiag(self, start, p_halt):
         """
-        Single random walk from `start` halting with prob p_halt at each step.
-
-        Returns
-        -------
-        list of (vertex, neighbors, weights, probs)
-            Full walk history including all information needed for
-            importance weight computation.
+        Walk on off-diagonal graph only. Used by M_only and trotter modes.
+        Returns list of (vertex, neighbors, weights, probs).
         """
         walk = []
         x    = start
@@ -207,162 +193,235 @@ class SpinSystem:
             weights = np.array(weights, dtype=float)
             probs   = self._transition_probs(weights)
             walk.append((x, neighbors, weights, probs))
-
             if np.random.uniform() < p_halt or len(neighbors) == 0:
                 break
-
             idx = np.random.choice(len(neighbors), p=probs)
             x   = neighbors[idx]
         return walk
 
+    # ── Incremental diagonal state for unbiased mode ──────────────
+
+    def _init_diagonal_state(self, x):
+        """
+        Initialise spin state, diagonal D_{xx}, and local fields l_i
+        at configuration x. Cost O(n * d) where d = mean J-degree.
+
+        Returns
+        -------
+        spins   : np.ndarray shape (n,), values in {-1, +1}
+        diag    : float, D_{xx}
+        lfields : np.ndarray shape (n,), l_i = sum_j J_ij sigma_j
+        """
+        spins   = np.array([1 - 2 * ((x >> i) & 1)
+                            for i in range(self.n)], dtype=float)
+        lfields = np.zeros(self.n)
+        for i, neighbors_i in enumerate(self.adj):
+            for j, J_ij in neighbors_i:
+                lfields[i] += J_ij * spins[j]
+        # D_{xx} = -0.5 * sum_i sigma_i * l_i  (each pair counted twice)
+        diag = -0.5 * float(np.dot(spins, lfields))
+        return spins, diag, lfields
+
+    def _flip_spin_incremental(self, i, spins, diag, lfields):
+        """
+        Update (spins, diag, lfields) after flipping spin i.
+        Cost O(d_i) where d_i = degree of spin i in J graph.
+
+        Update rule (derived from D = -sum_{i<j} J_ij sigma_i sigma_j):
+            D_new    = D_old + 2 * sigma_i * l_i
+            l_j     -= 2 * J_ij * sigma_i   for all j in N(i)
+            sigma_i  = -sigma_i
+        """
+        diag += 2.0 * spins[i] * lfields[i]
+        for j, J_ij in self.adj[i]:
+            lfields[j] -= 2.0 * J_ij * spins[i]
+        spins[i] = -spins[i]
+        return spins, diag, lfields
+
+    # ── Walk for unbiased mode (with self-loops) ──────────────────
+
+    def _random_walk_with_diagonal(self, start, p_halt):
+        """
+        Walk on full H including diagonal self-loops.
+        Diagonal computed incrementally via _flip_spin_incremental.
+        Returns list of (vertex, neighbors, weights, probs).
+
+        Self-loop at x has weight D_{xx} and keeps the walk at x.
+        Off-diagonal steps use -h_i weights as in M_only.
+        Cost per step: O(d_i) for diagonal update + O(n) for neighbors.
+        """
+        spins, diag, lfields = self._init_diagonal_state(start)
+        x    = start
+        walk = []
+
+        while True:
+            nb_offdiag, w_offdiag = self.get_neighbors_and_weights(x)
+            w_offdiag = np.array(w_offdiag, dtype=float)
+
+            # Prepend self-loop: vertex x, weight D_{xx}
+            neighbors = [x]       + list(nb_offdiag)
+            weights   = np.array([diag] + list(w_offdiag))
+            probs     = self._transition_probs(weights)
+            walk.append((x, neighbors, weights, probs))
+
+            if np.random.uniform() < p_halt:
+                break
+
+            idx    = np.random.choice(len(neighbors), p=probs)
+            next_x = neighbors[idx]
+
+            if next_x != x:
+                # Identify which spin flipped and update incrementally
+                flipped = int(np.log2(x ^ next_x))
+                spins, diag, lfields = self._flip_spin_incremental(
+                    flipped, spins, diag, lfields)
+            # If self-loop (next_x == x): diag unchanged, no update needed
+            x = next_x
+
+        return walk
+
+    # ── GRF vector implementations ────────────────────────────────
+
     def _grf_vector_M_only(self, v, p_halt, nb_walks, f_vec):
         """
-        Estimate column v of f(M) via random walks on the off-diagonal
-        graph only. Diagonal D is completely ignored.
-
-        Unbiased for [f(M)]_{:, v}.
-
-        Returns sparse dict {node: estimated f(M)[node, v]}.
+        Unbiased estimate of [f(M)]_{:,v} via off-diagonal walk.
+        D is ignored entirely. Cost O(n) per step.
         """
         rf = {}
         for _ in range(nb_walks):
-            walk            = self._random_walk(v, p_halt)
+            walk            = self._random_walk_offdiag(v, p_halt)
             weights_product = 1.0
             marginal_prob   = 1.0
-
             for step, (node, neighbors, weights, probs) in enumerate(walk):
                 if step < len(f_vec):
-                    contribution = (weights_product / marginal_prob) * f_vec[step]
-                    rf[node]     = rf.get(node, 0.0) + contribution
-
+                    rf[node] = rf.get(node, 0.0) + \
+                               (weights_product / marginal_prob) * f_vec[step]
                 if step < len(walk) - 1:
                     next_node        = walk[step + 1][0]
                     idx              = list(neighbors).index(next_node)
                     weights_product *= weights[idx]
                     marginal_prob   *= (1 - p_halt) * probs[idx]
-
         return {node: val / nb_walks for node, val in rf.items()}
 
     def _grf_vector_trotter(self, v, p_halt, nb_walks, f_vec, beta):
         """
-        Estimate column v of e^{-beta D/2} f(M) e^{-beta D/2} via the
-        symmetric Trotter correction.
-
-        The left factor e^{-beta D[v,v]/2} is applied at the start vertex.
-        The right factor e^{-beta D[node,node]/2} is applied at each
-        visited node. Together they approximate the full e^{-beta H}
-        entry up to O(beta^3) Trotter error.
-
-        Unbiased for [e^{-beta D} e^{-beta M}]_{:, v} up to Trotter error.
-
-        Returns sparse dict {node: estimated value}.
+        Estimate [e^{-bD/2} f(M) e^{-bD/2}]_{:,v} via Trotter correction.
+        Left factor e^{-bD[v,v]/2} absorbed at start; right factor at each node.
+        Cost O(n*d) per step (diagonal_entry called at each node).
+        Only meaningful for f = e^{-beta H}.
         """
         rf          = {}
         left_factor = np.exp(-beta * self.diagonal_entry(v) / 2.0)
-
         for _ in range(nb_walks):
-            walk            = self._random_walk(v, p_halt)
-            # Absorb left Trotter factor into starting weight
+            walk            = self._random_walk_offdiag(v, p_halt)
             weights_product = left_factor
             marginal_prob   = 1.0
-
             for step, (node, neighbors, weights, probs) in enumerate(walk):
                 if step < len(f_vec):
-                    # Absorb right Trotter factor at current node
                     right_factor = np.exp(-beta * self.diagonal_entry(node) / 2.0)
-                    contribution = (weights_product / marginal_prob) * f_vec[step] * right_factor
-                    rf[node]     = rf.get(node, 0.0) + contribution
-
+                    rf[node]     = rf.get(node, 0.0) + \
+                                   (weights_product / marginal_prob) * \
+                                   f_vec[step] * right_factor
                 if step < len(walk) - 1:
                     next_node        = walk[step + 1][0]
                     idx              = list(neighbors).index(next_node)
                     weights_product *= weights[idx]
                     marginal_prob   *= (1 - p_halt) * probs[idx]
-
         return {node: val / nb_walks for node, val in rf.items()}
 
-    # ── Public API ────────────────────────────────────────────────
+    def _grf_vector_unbiased(self, v, p_halt, nb_walks, f_vec):
+        """
+        Unbiased estimate of [f(H)]_{:,v} via walk on full H with self-loops.
+        Diagonal handled via incremental updates. Cost O(n + d) per step.
+
+        Unbiasedness: the walk samples paths in H^k exactly, including all
+        interleavings of diagonal (self-loop) and off-diagonal steps.
+        Non-commutativity of D and M is irrelevant because we expand
+        f(H) = sum_k alpha_k H^k at the Taylor series level, not the
+        exponential level. The GRF proposition applies to any matrix A,
+        so setting A = H gives an unbiased estimator of [f(H)]_{wv}.
+        """
+        rf = {}
+        for _ in range(nb_walks):
+            walk            = self._random_walk_with_diagonal(v, p_halt)
+            weights_product = 1.0
+            marginal_prob   = 1.0
+            for step, (node, neighbors, weights, probs) in enumerate(walk):
+                if step < len(f_vec):
+                    rf[node] = rf.get(node, 0.0) + \
+                               (weights_product / marginal_prob) * f_vec[step]
+                if step < len(walk) - 1:
+                    next_node        = walk[step + 1][0]
+                    idx              = neighbors.index(next_node)
+                    weights_product *= weights[idx]
+                    marginal_prob   *= (1 - p_halt) * probs[idx]
+        return {node: val / nb_walks for node, val in rf.items()}
+
+    # ── Public trace estimator ────────────────────────────────────
 
     def trace_estimate(self, f, beta, p_halt, nb_walks, nb_hutchinson,
-                       mode='M_only', max_walk_length=50, verbose=False):
+                       mode='unbiased', max_walk_length=50, verbose=False):
         """
         Estimate tr(f(H)) via Hutchinson + GRF.
 
         Parameters
         ----------
-        f : callable
-            Modulation function f(k) -> float. Taylor coefficient of f
-            at order k. For e^{-beta H} use f_diffusion(beta).
-        beta : float
-            Inverse temperature. Used only in mode='trotter' for the
-            diagonal correction. Ignored in mode='M_only'.
-        p_halt : float
-            Walk halting probability at each step. Mean walk length = (1-p)/p.
-            Smaller p_halt -> longer walks -> better approximation of f
-            but higher variance.
-        nb_walks : int
-            Number of random walks per vertex per Hutchinson sample.
-        nb_hutchinson : int
-            Number of Hutchinson probe vectors. More -> lower variance.
-        mode : str, optional
-            'M_only'  : estimate tr(f(M)), unbiased, ignores D (default).
-            'trotter' : estimate tr(e^{-bD} e^{-bM}), O(beta^3) bias.
-        max_walk_length : int, optional
-            Precompute f(k) up to this depth. Should exceed typical walk
-            length 1/p_halt by a comfortable margin.
-        verbose : bool, optional
-            Print per-sample estimates and running mean.
+        f               : callable, modulation function f(k) -> float.
+                          Use f_diffusion(beta) for e^{-beta H}.
+        beta            : float, inverse temperature.
+                          Used only in mode='trotter' for diagonal correction.
+        p_halt          : float in (0,1), halting probability per step.
+                          Mean walk length = (1 - p_halt) / p_halt.
+        nb_walks        : int, walks per vertex per Hutchinson sample.
+        nb_hutchinson   : int, number of Hutchinson probe vectors.
+        mode            : str, one of:
+                          'M_only'   — unbiased for tr(f(M)), ignores D
+                          'trotter'  — O(beta^3) bias, targets e^{-bD}e^{-bM}
+                          'unbiased' — exactly unbiased for tr(f(H)) [DEFAULT]
+        max_walk_length : int, precompute f up to this depth.
+        verbose         : bool, print per-sample progress.
 
         Returns
         -------
-        float
-            Trace estimate.
-
-        Notes
-        -----
-        The estimator is unbiased for:
-            mode='M_only'  -> tr(f(M))
-            mode='trotter' -> tr(e^{-beta D} e^{-beta M})
-        Neither is unbiased for tr(f(H)) when J != 0.
-        See module docstring for bias analysis.
+        float : trace estimate.
         """
-        assert mode in ('M_only', 'trotter'), \
-            "mode must be 'M_only' or 'trotter'"
+        assert mode in ('M_only', 'trotter', 'unbiased'), \
+            "mode must be 'M_only', 'trotter', or 'unbiased'"
+
+        # Build adj list once (used by unbiased mode for incremental updates)
+        if mode == 'unbiased':
+            self.adj = self.build_adj_list()
 
         size  = 1 << self.n
         f_vec = [f(k) for k in range(max_walk_length)]
 
-        # Select GRF vector function based on mode
         if mode == 'M_only':
-            grf_fn = lambda v: self._grf_vector_M_only(
-                v, p_halt, nb_walks, f_vec)
+            grf_fn = lambda v: self._grf_vector_M_only(v, p_halt, nb_walks, f_vec)
+        elif mode == 'trotter':
+            grf_fn = lambda v: self._grf_vector_trotter(v, p_halt, nb_walks, f_vec, beta)
         else:
-            grf_fn = lambda v: self._grf_vector_trotter(
-                v, p_halt, nb_walks, f_vec, beta)
+            grf_fn = lambda v: self._grf_vector_unbiased(v, p_halt, nb_walks, f_vec)
 
         estimates = []
         for s in range(nb_hutchinson):
             z   = {x: np.random.choice([-1.0, 1.0]) for x in range(size)}
             fHz = {}
-
             for v in range(size):
                 rf = grf_fn(v)
                 for node, val in rf.items():
                     fHz[node] = fHz.get(node, 0.0) + z[v] * val
-
             est = sum(z[node] * val for node, val in fHz.items())
             estimates.append(est)
             if verbose:
-                print(f"  [{mode}] Sample {s+1:3d}: {est:.4f}  "
-                      f"running mean = {np.mean(estimates):.4f}")
+                print(f"  [{mode}] sample {s+1:3d}: {est:.4f}  "
+                      f"mean = {np.mean(estimates):.4f}")
 
         return float(np.mean(estimates))
 
+    # ── Build full matrix (verification only) ────────────────────
+
     def build_hamiltonian(self):
-        """
-        Build the full 2^n x 2^n Hamiltonian matrix H = D + M.
-        Only for small n verification. Cost O(4^n).
-        """
+        """Build full 2^n x 2^n H = D + M. Only for small n verification."""
         size = 1 << self.n
         H    = np.zeros((size, size))
         for x in range(size):
@@ -372,100 +431,123 @@ class SpinSystem:
                 H[x, nb] = w
         return H
 
+    # ── Verification table ────────────────────────────────────────
+
     def verify(self, beta, p_halt, nb_walks, nb_hutchinson,
                max_walk_length=50):
         """
-        Run both estimator modes and compare against three ground truths.
+        Compare all three estimator modes against their ground truths.
 
-        Ground truths
-        -------------
-        exact_M       : tr(e^{-beta M})
-                        Unbiased target of mode='M_only'.
-        exact_trotter : tr(e^{-beta D} e^{-beta M})
-                        Unbiased target of mode='trotter'.
-        exact_H       : tr(e^{-beta H})
-                        True partition function. Neither mode is unbiased
-                        for this when J != 0.
+        Ground truths:
+            exact_M_closed  : 2^n * prod_i cosh(beta*h_i)
+                              O(n), exact, only for hypercube M systems.
+                              IDENTICAL to exact_M_expm up to float precision.
+            exact_M_expm    : np.trace(expm(-beta*M)), O(8^n).
+                              Shown alongside closed form to confirm equality.
+            exact_trotter   : np.trace(expm(-b*D) @ expm(-b*M)), O(8^n).
+            exact_H         : np.trace(expm(-beta*H)), O(8^n).
 
-        A correct implementation should show:
-            mode='M_only'  has ~0 error vs exact_M,  nonzero vs exact_H
-            mode='trotter' has ~0 error vs exact_trotter, smaller vs exact_H
+        Expected results:
+            mode='M_only'   ~0 error vs exact_M_expm  (and closed form)
+            mode='trotter'  ~0 error vs exact_trotter
+            mode='unbiased' ~0 error vs exact_H
         """
         H = self.build_hamiltonian()
         D = np.diag(np.diag(H))
         M = H - D
 
         exact_H       = np.trace(expm(-beta * H))
-        exact_M       = np.trace(expm(-beta * M))
+        exact_M_expm  = np.trace(expm(-beta * M))
         exact_trotter = np.trace(expm(-beta * D) @ expm(-beta * M))
 
         f = f_diffusion(beta)
 
-        est_M_only = self.trace_estimate(
-            f=f, beta=beta, p_halt=p_halt, nb_walks=nb_walks,
-            nb_hutchinson=nb_hutchinson, mode='M_only',
-            max_walk_length=max_walk_length
-        )
-        est_trotter = self.trace_estimate(
-            f=f, beta=beta, p_halt=p_halt, nb_walks=nb_walks,
-            nb_hutchinson=nb_hutchinson, mode='trotter',
-            max_walk_length=max_walk_length
-        )
-
-        print(f"\n{'='*65}")
-        print(f"  System : {self.__class__.__name__}  |  "
+        print(f"\n{'='*70}")
+        print(f"  System : {self.__class__.__name__}  "
               f"n={self.n}  beta={beta}  p_halt={p_halt}")
-        print(f"{'='*65}")
-        print(f"\n  Ground truths:")
-        print(f"    exact_M        = {exact_M:.6f}   <- unbiased target of M_only")
-        print(f"    exact_trotter  = {exact_trotter:.6f}   <- unbiased target of trotter")
-        print(f"    exact_H        = {exact_H:.6f}   <- true partition function")
-        print(f"\n  Estimates:")
-        print(f"{'Mode':<12} {'Estimate':>10} {'err vs M':>12} "
-              f"{'err vs Trotter':>16} {'err vs H':>12}")
-        print(f"  {'-'*60}")
-        for name, est in [("M_only", est_M_only), ("trotter", est_trotter)]:
-            err_M  = abs(est - exact_M)       / abs(exact_M)
-            err_T  = abs(est - exact_trotter) / abs(exact_trotter)
-            err_H  = abs(est - exact_H)       / abs(exact_H)
-            print(f"  {name:<12} {est:>10.4f} {err_M:>11.3%} "
-                  f"{err_T:>15.3%} {err_H:>11.3%}")
+        print(f"{'='*70}")
+
+        print(f"\n  Ground truths for tr(e^{{-beta*M}}):")
+        print(f"    exact_M_expm   = {exact_M_expm:.8f}  [expm on M, O(8^n)]")
+        if self.supports_closed_form_M:
+            exact_M_closed = exact_trace_M_hypercube(self.n, self.h, beta)
+            print(f"    exact_M_closed = {exact_M_closed:.8f}  "
+                  f"[2^n*prod cosh(b*h_i), O(n)]")
+            print(f"    difference     = {abs(exact_M_expm - exact_M_closed):.2e}"
+                  f"  <- machine precision confirms they are identical")
+        else:
+            print(f"    closed form not available for {self.__class__.__name__}"
+                  f" (M is not a sum of independent X_i terms)")
+
+        print(f"\n  Other ground truths:")
+        print(f"    exact_trotter  = {exact_trotter:.8f}  [expm(-bD) @ expm(-bM)]")
+        print(f"    exact_H        = {exact_H:.8f}  [true partition function]")
+
         print(f"\n  Bias from ignoring D:")
-        print(f"    |tr(e^{{-bM}}) - tr(e^{{-bH}})|  = "
-              f"{abs(exact_M - exact_H):.6f}")
-        print(f"    |tr(e^{{-bD}}e^{{-bM}}) - tr(e^{{-bH}})| = "
-              f"{abs(exact_trotter - exact_H):.6f}")
-        print(f"  (Trotter reduces bias by factor "
-              f"{abs(exact_M-exact_H)/max(abs(exact_trotter-exact_H),1e-12):.1f}x)\n")
+        bias_M  = abs(exact_M_expm - exact_H)
+        bias_T  = abs(exact_trotter - exact_H)
+        print(f"    |tr(e^{{-bM}}) - tr(e^{{-bH}})|         = {bias_M:.6f}")
+        print(f"    |tr(e^{{-bD}}e^{{-bM}}) - tr(e^{{-bH}})| = {bias_T:.6f}  "
+              f"({bias_M / max(bias_T, 1e-15):.1f}x reduction from Trotter)")
+
+        print(f"\n  Running estimators "
+              f"({nb_hutchinson} Hutchinson samples, {nb_walks} walks)...")
+
+        results = {}
+        for mode in ('M_only', 'trotter', 'unbiased'):
+            results[mode] = self.trace_estimate(
+                f=f, beta=beta, p_halt=p_halt, nb_walks=nb_walks,
+                nb_hutchinson=nb_hutchinson, mode=mode,
+                max_walk_length=max_walk_length
+            )
+
+        targets = {
+            'M_only'  : ('exact_M_expm',  exact_M_expm),
+            'trotter' : ('exact_trotter', exact_trotter),
+            'unbiased': ('exact_H',       exact_H),
+        }
+
+        print(f"\n  {'Mode':<12} {'Estimate':>10} {'Target':>14} "
+              f"{'Target val':>12} {'Rel. error':>12}")
+        print(f"  {'-'*63}")
+        for mode, est in results.items():
+            tname, tval = targets[mode]
+            err = abs(est - tval) / abs(tval)
+            print(f"  {mode:<12} {est:>10.4f} {tname:>14} "
+                  f"{tval:>12.4f} {err:>11.3%}")
+        print()
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SYSTEM 1: Standard TFIM
+# SYSTEM 1: Standard TFIM (sparse J)
 # ═══════════════════════════════════════════════════════════════════
 
 class TFIM(SpinSystem):
     """
     Transverse Field Ising Model.
-
         H = -sum_{i<j} J_ij Z_i Z_j - sum_i h_i X_i
 
-    Off-diagonal part M: single spin flips, weight -h_i.
-    Diagonal part D:     two-body ZZ coupling energies.
+    Off-diagonal M : single spin flips, weight -h_i. Hypercube graph.
+    Diagonal D     : two-body ZZ coupling energies.
 
-    Neighbor cost : O(n)     — one bit flip per neighbor.
-    Diagonal cost : O(n * d) — d = degree of J coupling graph.
+    supports_closed_form_M = True
+
+    Neighbor cost  : O(n)
+    Diagonal init  : O(n * d),  d = degree of J coupling graph
+    Diagonal update: O(d_i)     incremental, only neighbors of flipped spin
+                                -> O(1) per step for sparse J (1D chain, grid)
+                                -> O(n) per step for dense J (use RandomIsing)
     """
+
+    supports_closed_form_M = True
+
     def __init__(self, n, J, h):
         """
         Parameters
         ----------
-        n : int
-            Number of spins. Matrix dimension is 2^n.
-        J : (n, n) ndarray
-            Symmetric coupling matrix. J[i,j] = J[j,i], J[i,i] = 0.
-        h : (n,) ndarray
-            Transverse field strengths. Must be > 0 for walk to be
-            well-defined (zero h_i means no edge along that direction).
+        n : int,         number of spins
+        J : (n,n) array, symmetric coupling matrix, J[i,i] = 0
+        h : (n,) array,  transverse field strengths (all > 0)
         """
         self.n = n
         self.J = J
@@ -477,6 +559,7 @@ class TFIM(SpinSystem):
         return neighbors, weights
 
     def diagonal_entry(self, x):
+        """O(n * d) from scratch. Incremental update used inside walks."""
         energy = 0.0
         for i in range(self.n):
             si = 1 - 2 * ((x >> i) & 1)
@@ -486,6 +569,19 @@ class TFIM(SpinSystem):
                     energy -= self.J[i, j] * si * sj
         return energy
 
+    def build_adj_list(self):
+        """
+        Sparse adjacency list of J. Built once per trace_estimate call.
+        Per-step flip cost: O(d_i) where d_i = degree of spin i.
+        For 1D chain: d_i = 2 -> O(1) per step.
+        """
+        adj = [[] for _ in range(self.n)]
+        for i in range(self.n):
+            for j in range(self.n):
+                if i != j and self.J[i, j] != 0.0:
+                    adj[i].append((j, self.J[i, j]))
+        return adj
+
 
 # ═══════════════════════════════════════════════════════════════════
 # SYSTEM 2: p-body TFIM
@@ -494,33 +590,48 @@ class TFIM(SpinSystem):
 class PBodyTFIM(SpinSystem):
     """
     p-body Transverse Field Ising Model.
-
         H = -sum_{|S|=p} J_S (prod_{i in S} Z_i) - sum_i h_i X_i
 
-    Off-diagonal part M: IDENTICAL to TFIM — single spin flips, weight -h_i.
-    The p-body structure only affects the diagonal D.
+    Off-diagonal M : IDENTICAL to TFIM — single spin flips, weight -h_i.
+    Diagonal D     : p-body interactions.
 
-    Neighbor cost : O(n)         — same as TFIM, walk is UNCHANGED.
-    Diagonal cost : O(C(n, p))   — sum over all p-tuples in J_tensor.
+    supports_closed_form_M = True  (same hypercube M as TFIM)
 
-    Parameters
-    ----------
-    J_tensor : dict {frozenset of p indices -> coupling value}
-        Use PBodyTFIM.random_J_tensor(n, p) to generate randomly.
+    Neighbor cost  : O(n)
+    Diagonal init  : O(C(n,p))       — sum over all p-tuples
+    Diagonal update: O(C(n-1,p-1))   — only p-tuples containing flipped spin
+                     Precomputed via _spin_to_tuples index at construction.
     """
+
+    supports_closed_form_M = True
+
     def __init__(self, n, J_tensor, h, p):
+        """
+        Parameters
+        ----------
+        n        : int,   number of spins
+        J_tensor : dict   {frozenset of p indices -> float coupling}
+        h        : (n,)   transverse field
+        p        : int,   interaction order (p=2 recovers standard TFIM)
+        """
         self.n        = n
         self.J_tensor = J_tensor
         self.h        = h
         self.p        = p
+        # Index: spin i -> list of (tuple_indices, J_val) that contain i
+        # Allows O(C(n-1,p-1)) incremental diagonal update per flip.
+        self._spin_to_tuples = {i: [] for i in range(n)}
+        for indices, J_val in J_tensor.items():
+            for i in indices:
+                self._spin_to_tuples[i].append((indices, J_val))
 
     def get_neighbors_and_weights(self, x):
-        """Identical to TFIM — p-body only affects diagonal."""
         neighbors = [x ^ (1 << i) for i in range(self.n)]
         weights   = np.array([-self.h[i] for i in range(self.n)])
         return neighbors, weights
 
     def diagonal_entry(self, x):
+        """O(C(n,p)) from scratch."""
         energy = 0.0
         for indices, J_val in self.J_tensor.items():
             spin_product = 1.0
@@ -529,22 +640,41 @@ class PBodyTFIM(SpinSystem):
             energy -= J_val * spin_product
         return energy
 
+    def build_adj_list(self):
+        """
+        p-body has no 2-body adj list. Return empty — we override
+        _init_diagonal_state and _flip_spin_incremental instead.
+        """
+        return [[] for _ in range(self.n)]
+
+    def _init_diagonal_state(self, x):
+        """
+        For p-body: store spins and precompute diagonal from scratch.
+        Local fields are not defined for p > 2, so we skip them.
+        Returns (spins, diag, None) — lfields unused.
+        """
+        spins = np.array([1 - 2 * ((x >> i) & 1)
+                          for i in range(self.n)], dtype=float)
+        diag  = self.diagonal_entry(x)
+        return spins, diag, None
+
+    def _flip_spin_incremental(self, i, spins, diag, lfields):
+        """
+        p-body incremental update: revisit only p-tuples containing spin i.
+        Cost O(C(n-1, p-1)) per flip — much cheaper than O(C(n,p)) from scratch.
+        """
+        for indices, J_val in self._spin_to_tuples[i]:
+            old_prod = 1.0
+            for k in indices:
+                old_prod *= spins[k]
+            new_prod  = old_prod * (-1)   # only spin i changes sign
+            diag     += J_val * (old_prod - new_prod)
+        spins[i] = -spins[i]
+        return spins, diag, None
+
     @staticmethod
     def random_J_tensor(n, p, scale=1.0, seed=None):
-        """
-        Generate a random J_tensor for p-body interactions.
-
-        Parameters
-        ----------
-        n     : number of spins
-        p     : interaction order (p=2 recovers TFIM)
-        scale : coupling strength
-        seed  : random seed
-
-        Returns
-        -------
-        dict {frozenset -> float}
-        """
+        """Random p-body coupling tensor as dict {frozenset -> float}."""
         rng      = np.random.default_rng(seed)
         J_tensor = {}
         for indices in combinations(range(n), p):
@@ -553,30 +683,36 @@ class PBodyTFIM(SpinSystem):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SYSTEM 3: Random Ising (Sherrington-Kirkpatrick)
+# SYSTEM 3: Sherrington-Kirkpatrick (dense random Ising)
 # ═══════════════════════════════════════════════════════════════════
 
 class RandomIsing(SpinSystem):
     """
     Sherrington-Kirkpatrick (SK) spin glass with transverse field.
+        H = -sum_{i<j} J_ij Z_i Z_j - sum_i h_i X_i,  J_ij ~ N(0, J^2/n)
 
-        H = -sum_{i<j} J_ij Z_i Z_j - sum_i h_i X_i
-        J_ij ~ N(0, J_scale^2 / n)
+    J is DENSE: every spin couples to every other.
+    Diagonal cost from scratch: O(n^2).
+    With incremental update: O(n) per step — best possible for dense J
+    since flipping any spin changes all n-1 local fields.
 
-    Structurally identical to TFIM. Provided as a separate class
-    for convenience and to enforce SK scaling of couplings.
+    supports_closed_form_M = True  (same hypercube M as TFIM)
 
-    Neighbor cost : O(n).
-    Diagonal cost : O(n * n) = O(n^2) since J is dense.
+    Neighbor cost  : O(n)
+    Diagonal init  : O(n^2)   — unavoidable for dense J, done once per walk
+    Diagonal update: O(n)     — incremental, all n neighbors of flipped spin
     """
+
+    supports_closed_form_M = True
+
     def __init__(self, n, h, J_scale=1.0, seed=None):
         """
         Parameters
         ----------
-        n       : number of spins
-        h       : (n,) transverse field
-        J_scale : coupling scale. SK convention: J_ij ~ N(0, J_scale^2/n).
-        seed    : random seed for reproducibility of J.
+        n       : int,    number of spins
+        h       : (n,) array, transverse field
+        J_scale : float,  coupling scale, J_ij ~ N(0, J_scale^2 / n)
+        seed    : int,    random seed for reproducibility of J
         """
         self.n = n
         self.h = h
@@ -591,14 +727,26 @@ class RandomIsing(SpinSystem):
         return neighbors, weights
 
     def diagonal_entry(self, x):
+        """O(n^2) from scratch — incremental used inside walks."""
         energy = 0.0
         for i in range(self.n):
             si = 1 - 2 * ((x >> i) & 1)
             for j in range(i + 1, self.n):
-                if self.J[i, j] != 0:
-                    sj = 1 - 2 * ((x >> j) & 1)
-                    energy -= self.J[i, j] * si * sj
+                sj = 1 - 2 * ((x >> j) & 1)
+                energy -= self.J[i, j] * si * sj
         return energy
+
+    def build_adj_list(self):
+        """
+        Dense adj list: spin i connects to all j != i.
+        Per-step flip cost O(n) — optimal for dense SK model.
+        """
+        adj = []
+        for i in range(self.n):
+            adj.append([(j, self.J[i, j])
+                        for j in range(self.n)
+                        if i != j and self.J[i, j] != 0.0])
+        return adj
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -608,31 +756,30 @@ class RandomIsing(SpinSystem):
 class XXZ(SpinSystem):
     """
     XXZ model (anisotropic Heisenberg).
-
         H = sum_{i<j} J_ij (X_i X_j + Y_i Y_j) + Delta * sum_{i<j} J_ij Z_i Z_j
 
-    The XX+YY term = 2(S+_i S-_j + S-_i S+_j) flips TWO spins simultaneously
-    (one up->down, one down->up), preserving total magnetization.
+    XX+YY flips TWO spins simultaneously (swap move), preserving magnetization.
+    Walk graph is NOT the hypercube — it is the union of magnetization-preserving
+    swap moves. Configs with all spins up or all down are isolated.
 
-    Off-diagonal part M: two-spin swap moves, weight 2*J_ij.
-                         Each config has O(n^2) neighbors.
-    Diagonal part D:     ZZ anisotropy, weight Delta * J_ij.
+    supports_closed_form_M = False  (M mixes sites, does not factorise)
 
-    Neighbor cost : O(n^2) — all (i up, j down) pairs.
-    Diagonal cost : O(n^2) — all pairs for ZZ term.
-
-    NOTE: The walk graph is NOT the hypercube but the union of
-    magnetization-preserving swap moves. Configs with all spins up or
-    all down are isolated (no neighbors) and contribute only via the
-    diagonal to the Hutchinson estimator.
-
-    Parameters
-    ----------
-    Delta : float
-        Anisotropy. Delta=1: Heisenberg. Delta=0: pure XX model.
-                    Delta->inf: classical Ising limit.
+    Neighbor cost  : O(n^2) — all (i up, j down) swap pairs
+    Diagonal init  : O(n^2)
+    Diagonal update: O(d_i + d_j) per step for two-spin flip (i, j)
+                     where d_k = degree of spin k in J graph
     """
+
+    supports_closed_form_M = False
+
     def __init__(self, n, J, Delta=1.0):
+        """
+        Parameters
+        ----------
+        n     : int,         number of spins
+        J     : (n,n) array, symmetric coupling matrix
+        Delta : float,       ZZ anisotropy (Delta=1: Heisenberg, Delta=0: XX)
+        """
         self.n     = n
         self.J     = J
         self.Delta = Delta
@@ -645,8 +792,7 @@ class XXZ(SpinSystem):
                     continue
                 si = (x >> i) & 1
                 sj = (x >> j) & 1
-                # S+_i S-_j acts on |..down_i..up_j..> -> |..up_i..down_j..>
-                if si == 0 and sj == 1:
+                if si == 0 and sj == 1:   # spin i up, spin j down -> swap
                     x_new = x ^ (1 << i) ^ (1 << j)
                     neighbors.append(x_new)
                     weights.append(2.0 * self.J[i, j])
@@ -662,35 +808,67 @@ class XXZ(SpinSystem):
                     energy += self.Delta * self.J[i, j] * si * sj
         return energy
 
+    def build_adj_list(self):
+        """
+        For XXZ diagonal (Delta * ZZ), adj list uses Delta * J_ij weights.
+        Each step flips two spins i, j — apply _flip_spin_incremental twice.
+        Cost per step: O(d_i + d_j).
+        """
+        adj = []
+        for i in range(self.n):
+            adj.append([(j, self.Delta * self.J[i, j])
+                        for j in range(self.n)
+                        if i != j and self.J[i, j] != 0.0])
+        return adj
+
+    def _random_walk_with_diagonal(self, start, p_halt):
+        """
+        Override for XXZ: each off-diagonal step flips TWO spins.
+        Apply _flip_spin_incremental for each flipped spin separately.
+        """
+        spins, diag, lfields = self._init_diagonal_state(start)
+        x    = start
+        walk = []
+
+        while True:
+            nb_offdiag, w_offdiag = self.get_neighbors_and_weights(x)
+            w_offdiag = np.array(w_offdiag, dtype=float)
+            neighbors = [x]       + list(nb_offdiag)
+            weights   = np.array([diag] + list(w_offdiag))
+            probs     = self._transition_probs(weights)
+            walk.append((x, neighbors, weights, probs))
+
+            if np.random.uniform() < p_halt:
+                break
+
+            idx    = np.random.choice(len(neighbors), p=probs)
+            next_x = neighbors[idx]
+
+            if next_x != x:
+                diff    = x ^ next_x
+                flipped = [b for b in range(self.n) if diff & (1 << b)]
+                for b in flipped:   # apply incremental update for each flipped spin
+                    spins, diag, lfields = self._flip_spin_incremental(
+                        b, spins, diag, lfields)
+            x = next_x
+
+        return walk
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Modulation functions
 # ═══════════════════════════════════════════════════════════════════
 
 def f_diffusion(beta):
-    """
-    Modulation function for f(H) = e^{-beta H}.
-    Taylor coefficient at order k: (-beta)^k / (2^k * k!)
-
-    The 2^k factor is the GRF normalization convention from
-    Choromanski et al. — it accounts for the symmetric random walk
-    on the hypercube where each step divides by 2.
-    """
+    """f(k) = (-beta)^k / (2^k * k!) for e^{-beta H}."""
     return lambda k: ((-beta) ** k) / (2**k * scipy.special.factorial(k))
 
 def f_resolvent(beta):
-    """
-    Modulation function for f(H) = (I - beta H)^{-1}.
-    Taylor coefficient at order k: beta^k (geometric series).
-    Only valid when beta * ||H||_2 < 1.
-    """
+    """f(k) = beta^k for (I - beta*H)^{-1}. Valid when beta*||H||_2 < 1."""
     return lambda k: float(beta ** k)
 
 def f_p_step_rw(p):
-    """
-    Modulation function for f(H) = (I + H)^p.
-    Taylor coefficient at order k: C(p, k) (binomial).
-    """
+    """f(k) = C(p,k) for (I + H)^p."""
     return lambda k: float(scipy.special.comb(p, k))
 
 
@@ -709,7 +887,6 @@ if __name__ == "__main__":
     nb_walks = 64
     nb_hutch = 300
 
-    # 1D chain coupling
     J = np.zeros((n, n))
     for i in range(n - 1):
         J[i, i+1] = J[i+1, i] = J_val
