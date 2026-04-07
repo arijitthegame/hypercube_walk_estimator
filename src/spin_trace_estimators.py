@@ -861,7 +861,7 @@ class XXZ(SpinSystem):
 
 def f_diffusion(beta):
     """f(k) = (-beta)^k / (2^k * k!) for e^{-beta H}."""
-    return lambda k: ((-beta) ** k) / (2**k * scipy.special.factorial(k))
+    return lambda k: ((beta) ** k) / scipy.special.factorial(k))
 
 def f_resolvent(beta):
     """f(k) = beta^k for (I - beta*H)^{-1}. Valid when beta*||H||_2 < 1."""
