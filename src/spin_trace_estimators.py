@@ -125,6 +125,11 @@ def exact_trace_M_hypercube(n, h, beta):
     return float((2 ** n) * np.prod(np.cosh(beta * np.asarray(h))))
 
 
+def rademacher_hash(x, seed):
+    h = (x * 0x9e3779b97f4a7c15 + seed) & 0xFFFFFFFFFFFFFFFF
+    return 1.0 if (h >> 63) == 0 else -1.0
+
+
 # ═══════════════════════════════════════════════════════════════════
 # BASE CLASS
 # ═══════════════════════════════════════════════════════════════════
@@ -359,62 +364,104 @@ class SpinSystem:
 
     # ── Public trace estimator ────────────────────────────────────
 
-    def trace_estimate(self, f, beta, p_halt, nb_walks, nb_hutchinson,
-                       mode='unbiased', max_walk_length=50, verbose=False):
-        """
-        Estimate tr(f(H)) via Hutchinson + GRF.
+    def trace_estimate(self, f, beta, p_halt,
+                           nb_walks,
+                           nb_hutchinson,
+                           nb_sources,
+                           mode='unbiased',
+                           max_walk_length=50,
+                           verbose=False):
 
-        Parameters
-        ----------
-        f               : callable, modulation function f(k) -> float.
-                          Use f_diffusion(beta) for e^{-beta H}.
-        beta            : float, inverse temperature.
-                          Used only in mode='trotter' for diagonal correction.
-        p_halt          : float in (0,1), halting probability per step.
-                          Mean walk length = (1 - p_halt) / p_halt.
-        nb_walks        : int, walks per vertex per Hutchinson sample.
-        nb_hutchinson   : int, number of Hutchinson probe vectors.
-        mode            : str, one of:
-                          'M_only'   — unbiased for tr(f(M)), ignores D
-                          'trotter'  — O(beta^3) bias, targets e^{-bD}e^{-bM}
-                          'unbiased' — exactly unbiased for tr(f(H)) [DEFAULT]
-        max_walk_length : int, precompute f up to this depth.
-        verbose         : bool, print per-sample progress.
+        assert mode in ('M_only', 'trotter', 'unbiased')
 
-        Returns
-        -------
-        float : trace estimate.
-        """
-        assert mode in ('M_only', 'trotter', 'unbiased'), \
-            "mode must be 'M_only', 'trotter', or 'unbiased'"
-
-        # Build adj list once (used by unbiased mode for incremental updates)
         if mode == 'unbiased':
             self.adj = self.build_adj_list()
 
         size  = 1 << self.n
         f_vec = [f(k) for k in range(max_walk_length)]
 
-        if mode == 'M_only':
-            grf_fn = lambda v: self._grf_vector_M_only(v, p_halt, nb_walks, f_vec)
-        elif mode == 'trotter':
-            grf_fn = lambda v: self._grf_vector_trotter(v, p_halt, nb_walks, f_vec, beta)
-        else:
-            grf_fn = lambda v: self._grf_vector_unbiased(v, p_halt, nb_walks, f_vec)
-
         estimates = []
+
         for s in range(nb_hutchinson):
-            z   = {x: np.random.choice([-1.0, 1.0]) for x in range(size)}
-            fHz = {}
-            for v in range(size):
-                rf = grf_fn(v)
-                for node, val in rf.items():
-                    fHz[node] = fHz.get(node, 0.0) + z[v] * val
-            est = sum(z[node] * val for node, val in fHz.items())
+
+            est = 0.0
+
+            for _ in range(nb_sources):
+
+                v = np.random.randint(size)
+                norm = size / nb_sources
+
+                # choose walk generator
+                if mode == 'unbiased':
+                    walk_fn = self._random_walk_with_diagonal
+                else:
+                    walk_fn = self._random_walk_offdiag
+
+                for _ in range(nb_walks):
+
+                    #  independent walks
+                    walk_A = walk_fn(v, p_halt)
+                    walk_B = walk_fn(v, p_halt)
+
+                    # ---- accumulate projected sums directly ----
+                    sum_A = 0.0
+                    sum_B = 0.0
+
+                    # ===== WALK A =====
+                    weights_product = 1.0
+                    marginal_prob   = 1.0
+
+                    if mode == 'trotter':
+                        weights_product *= np.exp(-beta * self.diagonal_entry(v) / 2.0)
+
+                    for step, (node, neighbors, weights, probs) in enumerate(walk_A):
+
+                        if step < len(f_vec):
+                            contrib = (weights_product / marginal_prob) * f_vec[step]
+
+                            if mode == 'trotter':
+                                contrib *= np.exp(-beta * self.diagonal_entry(node) / 2.0)
+
+                            sum_A += rademacher_hash(node, s) * contrib
+
+                        if step < len(walk_A) - 1:
+                            next_node = walk_A[step + 1][0]
+                            idx       = neighbors.index(next_node)
+
+                            weights_product *= weights[idx]
+                            marginal_prob   *= (1 - p_halt) * probs[idx]
+
+                    # ===== WALK B (independent) =====
+                    weights_product = 1.0
+                    marginal_prob   = 1.0
+
+                    if mode == 'trotter':
+                        weights_product *= np.exp(-beta * self.diagonal_entry(v) / 2.0)
+
+                    for step, (node, neighbors, weights, probs) in enumerate(walk_B):
+
+                        if step < len(f_vec):
+                            contrib = (weights_product / marginal_prob) * f_vec[step]
+
+                            if mode == 'trotter':
+                                contrib *= np.exp(-beta * self.diagonal_entry(node) / 2.0)
+
+                            sum_B += rademacher_hash(node, s) * contrib
+
+                        if step < len(walk_B) - 1:
+                            next_node = walk_B[step + 1][0]
+                            idx       = neighbors.index(next_node)
+
+                            weights_product *= weights[idx]
+                            marginal_prob   *= (1 - p_halt) * probs[idx]
+
+                    #  unbiased AB^T estimator contribution
+                    est += norm * sum_A * sum_B
+
             estimates.append(est)
+
             if verbose:
-                print(f"  [{mode}] sample {s+1:3d}: {est:.4f}  "
-                      f"mean = {np.mean(estimates):.4f}")
+                print(f"[{mode}] sample {s+1}: {est:.4f}, mean={np.mean(estimates):.4f}")
 
         return float(np.mean(estimates))
 
@@ -861,7 +908,7 @@ class XXZ(SpinSystem):
 
 def f_diffusion(beta):
     """f(k) = (-beta)^k / (2^k * k!) for e^{-beta H}."""
-    return lambda k: ((beta) ** k) / scipy.special.factorial(k))
+    return lambda k: (-beta ** k) / ((2**k) * scipy.special.factorial(k))
 
 def f_resolvent(beta):
     """f(k) = beta^k for (I - beta*H)^{-1}. Valid when beta*||H||_2 < 1."""
