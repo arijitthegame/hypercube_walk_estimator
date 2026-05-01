@@ -365,105 +365,101 @@ class SpinSystem:
     # ── Public trace estimator ────────────────────────────────────
 
     def trace_estimate(self, f, beta, p_halt,
-                           nb_walks,
-                           nb_hutchinson,
-                           nb_sources,
-                           mode='unbiased',
-                           max_walk_length=50,
-                           verbose=False):
+                   nb_walks,
+                   nb_hutchinson,
+                   nb_sources,
+                   mode='unbiased',
+                   max_walk_length=50,
+                   verbose=False):
 
         assert mode in ('M_only', 'trotter', 'unbiased')
 
         if mode == 'unbiased':
-            self.adj = self.build_adj_list()
+          self.adj = self.build_adj_list()
 
         size  = 1 << self.n
+      
+        # IMPORTANT: If estimating Tr(f(H)) via AB^T, the walks A and B 
+        # should represent sqrt(f). For e^{-beta H}, this means f_vec 
+        # should be precomputed using beta/2.
         f_vec = [f(k) for k in range(max_walk_length)]
+
+        # We average the sum_A * sum_B over nb_walks to reduce variance
+        # and scale by size/nb_sources to estimate the full trace.
+        norm = size / (nb_sources * nb_walks)
 
         estimates = []
 
         for s in range(nb_hutchinson):
+          est = 0.0
 
-            est = 0.0
+          for _ in range(nb_sources):
+              v = np.random.randint(size)
+              
+              if mode == 'unbiased':
+                  walk_fn = self._random_walk_with_diagonal
+              else:
+                  walk_fn = self._random_walk_offdiag
 
-            for _ in range(nb_sources):
+              for _ in range(nb_walks):
+                  # Independent walks from same source v
+                  walk_A = walk_fn(v, p_halt)
+                  walk_B = walk_fn(v, p_halt)
 
-                v = np.random.randint(size)
-                norm = size / nb_sources
+                  # --- WALK A ---
+                  sum_A = 0.0
+                  weights_product = 1.0
+                  marginal_prob   = 1.0
 
-                # choose walk generator
-                if mode == 'unbiased':
-                    walk_fn = self._random_walk_with_diagonal
-                else:
-                    walk_fn = self._random_walk_offdiag
+                  if mode == 'trotter':
+                      # Use beta/2.0 because this walk represents f(H)^{1/2}
+                      weights_product *= np.exp(-beta/2.0 * self.diagonal_entry(v) / 2.0)
 
-                for _ in range(nb_walks):
+                  for step, (node, neighbors, weights, probs) in enumerate(walk_A):
+                      if step < len(f_vec):
+                          contrib = (weights_product / marginal_prob) * f_vec[step]
+                          if mode == 'trotter':
+                              contrib *= np.exp(-beta/2.0 * self.diagonal_entry(node) / 2.0)
+                          
+                          sum_A += rademacher_hash(node, s) * contrib
 
-                    #  independent walks
-                    walk_A = walk_fn(v, p_halt)
-                    walk_B = walk_fn(v, p_halt)
+                      if step < len(walk_A) - 1:
+                          next_node = walk_A[step + 1][0]
+                          idx = neighbors.index(next_node)
+                          weights_product *= weights[idx]
+                          marginal_prob   *= (1 - p_halt) * probs[idx]
 
-                    # ---- accumulate projected sums directly ----
-                    sum_A = 0.0
-                    sum_B = 0.0
+                  # --- WALK B ---
+                  sum_B = 0.0
+                  weights_product = 1.0
+                  marginal_prob   = 1.0
 
-                    # ===== WALK A =====
-                    weights_product = 1.0
-                    marginal_prob   = 1.0
+                  if mode == 'trotter':
+                      weights_product *= np.exp(-beta/2.0 * self.diagonal_entry(v) / 2.0)
 
-                    if mode == 'trotter':
-                        weights_product *= np.exp(-beta * self.diagonal_entry(v) / 2.0)
+                  for step, (node, neighbors, weights, probs) in enumerate(walk_B):
+                      if step < len(f_vec):
+                          contrib = (weights_product / marginal_prob) * f_vec[step]
+                          if mode == 'trotter':
+                              contrib *= np.exp(-beta/2.0 * self.diagonal_entry(node) / 2.0)
+                          
+                          sum_B += rademacher_hash(node, s) * contrib
 
-                    for step, (node, neighbors, weights, probs) in enumerate(walk_A):
+                      if step < len(walk_B) - 1:
+                          next_node = walk_B[step + 1][0]
+                          idx = neighbors.index(next_node)
+                          weights_product *= weights[idx]
+                          marginal_prob   *= (1 - p_halt) * probs[idx]
 
-                        if step < len(f_vec):
-                            contrib = (weights_product / marginal_prob) * f_vec[step]
+                  # Unbiased estimate of row v of AB^T: (z^T A_v) * (z^T B_v)
+                  est += norm * sum_A * sum_B
 
-                            if mode == 'trotter':
-                                contrib *= np.exp(-beta * self.diagonal_entry(node) / 2.0)
-
-                            sum_A += rademacher_hash(node, s) * contrib
-
-                        if step < len(walk_A) - 1:
-                            next_node = walk_A[step + 1][0]
-                            idx       = neighbors.index(next_node)
-
-                            weights_product *= weights[idx]
-                            marginal_prob   *= (1 - p_halt) * probs[idx]
-
-                    # ===== WALK B (independent) =====
-                    weights_product = 1.0
-                    marginal_prob   = 1.0
-
-                    if mode == 'trotter':
-                        weights_product *= np.exp(-beta * self.diagonal_entry(v) / 2.0)
-
-                    for step, (node, neighbors, weights, probs) in enumerate(walk_B):
-
-                        if step < len(f_vec):
-                            contrib = (weights_product / marginal_prob) * f_vec[step]
-
-                            if mode == 'trotter':
-                                contrib *= np.exp(-beta * self.diagonal_entry(node) / 2.0)
-
-                            sum_B += rademacher_hash(node, s) * contrib
-
-                        if step < len(walk_B) - 1:
-                            next_node = walk_B[step + 1][0]
-                            idx       = neighbors.index(next_node)
-
-                            weights_product *= weights[idx]
-                            marginal_prob   *= (1 - p_halt) * probs[idx]
-
-                    #  unbiased AB^T estimator contribution
-                    est += norm * sum_A * sum_B
-
-            estimates.append(est)
-
-            if verbose:
-                print(f"[{mode}] sample {s+1}: {est:.4f}, mean={np.mean(estimates):.4f}")
+          estimates.append(est)
+          if verbose:
+              print(f"[{mode}] sample {s+1}: {est:.4f}, mean={np.mean(estimates):.4f}")
 
         return float(np.mean(estimates))
+
 
     # ── Build full matrix (verification only) ────────────────────
 
