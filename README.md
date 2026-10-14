@@ -40,5 +40,3 @@ booktitle={The Fortieth Annual Conference on Neural Information Processing Syste
 year={2026},
 url={https://openreview.net/forum?id=wLHljLWRDA}
 }
-# GRF_Quantum_Physics
-GRF For Quantum Physics
