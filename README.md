@@ -33,7 +33,7 @@ If you find our work useful, please cite :
 
 ```bibtex
 @inproceedings{
-anonymous2026walking,
+dubey2026walking,
 title={Walking the Hypercube: Unbiased Quantum Partition Functions Without the Matrix},
 author={Kumar Avinava Dubey and Arijit Sehanobish and Krzysztof Marcin Choromanski},
 booktitle={The Fortieth Annual Conference on Neural Information Processing Systems},
