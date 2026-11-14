@@ -2,7 +2,7 @@
 
 ## An unbiased estimator for the partition function of a quantum spin Hamiltonian which runs in linear time.
 
-In this work, we propose an unbiased stochastic estimator of the partition function using only local random walks, avoiding both matrix materialization and matrix-vector products. Our approach combines Graph Random Features with the Hutchinson’s stochastic trace estimator, and exploits the algebraic structure of quantum spin Hamiltonians to reduce the per-step computational cost to O(n + d), where d is the mean degree of the spin coupling graph, independent of the Hilbert space dimension N = 2n. 
+In this work, we propose an unbiased stochastic estimator of the partition function using only local random walks, avoiding both matrix materialization and matrix-vector products. Our approach combines Graph Random Features with the Hutchinson’s stochastic trace estimator, and exploits the algebraic structure of quantum spin Hamiltonians to reduce the per-step computational cost to O(n + d), where d is the mean degree of the spin coupling graph, independent of the Hilbert space dimension N = 2^n. 
 
 The repo accompanies the paper ["Walking the Hypercube: Unbiased Quantum Partition Functions Without the Matrix"](https://openreview.net/forum?id=wLHljLWRDA)
 
