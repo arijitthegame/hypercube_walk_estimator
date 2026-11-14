@@ -1,3 +1,6 @@
+## Stand alone file to understand the structure of Hamiltonians
+## USeful for people without a physics background.
+
 import numpy as np
 from math import comb
 

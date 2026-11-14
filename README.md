@@ -19,13 +19,10 @@ Google Research, Kensho Technologies, Google DeepMind, Columbia University,
 git clone https://github.com/arijitthegame/hypercube_walk_estimator.git
 cd super_graph_random_features
 python3 -m venv env
-source env/bin/activate
-pip3 install -r requirements.txt
-pip3 install -e . --user
 ```
 
 ## Getting Started
-All code resides in the `src` folder.  
+All code resides in the `src` folder.  The main file that contains HWE mechanism is in `spin_trace_estimators.py`
 
 
 ## Citation
