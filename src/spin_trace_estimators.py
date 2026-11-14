@@ -124,10 +124,12 @@ def exact_trace_M_hypercube(n, h, beta):
     """
     return float((2 ** n) * np.prod(np.cosh(beta * np.asarray(h))))
 
-
 def rademacher_hash(x, seed):
-    h = (x * 0x9e3779b97f4a7c15 + seed) & 0xFFFFFFFFFFFFFFFF
-    return 1.0 if (h >> 63) == 0 else -1.0
+    z = (x + seed * 0x9e3779b97f4a7c15 + 0x9e3779b97f4a7c15) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 30)) * 0xbf58476d1ce4e5b9) & 0xFFFFFFFFFFFFFFFF
+    z = ((z ^ (z >> 27)) * 0x94d049bb133111eb) & 0xFFFFFFFFFFFFFFFF
+    z ^= z >> 31
+    return 1.0 if (z & 1) == 0 else -1.0
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -286,6 +288,7 @@ class SpinSystem:
         return walk
 
     # ── GRF vector implementations ────────────────────────────────
+    # these functions can be used to estimate Lang-Trotter or off diagonals
 
     def _grf_vector_M_only(self, v, p_halt, nb_walks, f_vec):
         """
@@ -361,6 +364,8 @@ class SpinSystem:
                     weights_product *= weights[idx]
                     marginal_prob   *= (1 - p_halt) * probs[idx]
         return {node: val / nb_walks for node, val in rf.items()}
+
+    # ------------------------------------------------------------
 
     # ── Public trace estimator ────────────────────────────────────
 
@@ -477,7 +482,7 @@ class SpinSystem:
     # ── Verification table ────────────────────────────────────────
 
     def verify(self, beta, p_halt, nb_walks, nb_hutchinson,
-               max_walk_length=50):
+               nb_sources=1, max_walk_length=50):
         """
         Compare all three estimator modes against their ground truths.
 
@@ -501,8 +506,9 @@ class SpinSystem:
 
         exact_H       = np.trace(expm(-beta * H))
         exact_M_expm  = np.trace(expm(-beta * M))
-        exact_trotter = np.trace(expm(-beta * D) @ expm(-beta * M))
-
+        eD = expm(-beta * D / 2)
+        eM = expm(-beta * M / 2)
+        exact_trotter = np.trace(eD @ eM @ eD @ eM)
         f = f_diffusion(beta)
 
         print(f"\n{'='*70}")
@@ -541,7 +547,7 @@ class SpinSystem:
             results[mode] = self.trace_estimate(
                 f=f, beta=beta, p_halt=p_halt, nb_walks=nb_walks,
                 nb_hutchinson=nb_hutchinson, mode=mode,
-                max_walk_length=max_walk_length
+                max_walk_length=max_walk_length, nb_sources=nb_sources
             )
 
         targets = {
@@ -761,7 +767,7 @@ class RandomIsing(SpinSystem):
         self.h = h
         rng    = np.random.default_rng(seed)
         raw    = rng.standard_normal((n, n)) * J_scale / np.sqrt(n)
-        self.J = (raw + raw.T) / 2
+        self.J = (raw + raw.T) / np.sqrt(2)
         np.fill_diagonal(self.J, 0)
 
     def get_neighbors_and_weights(self, x):
@@ -853,13 +859,13 @@ class XXZ(SpinSystem):
 
     def build_adj_list(self):
         """
-        For XXZ diagonal (Delta * ZZ), adj list uses Delta * J_ij weights.
+        For XXZ diagonal (Delta * ZZ), adj list uses -Delta * J_ij weights.
         Each step flips two spins i, j — apply _flip_spin_incremental twice.
         Cost per step: O(d_i + d_j).
         """
         adj = []
         for i in range(self.n):
-            adj.append([(j, self.Delta * self.J[i, j])
+            adj.append([(j, -self.Delta * self.J[i, j])
                         for j in range(self.n)
                         if i != j and self.J[i, j] != 0.0])
         return adj
@@ -904,7 +910,7 @@ class XXZ(SpinSystem):
 
 def f_diffusion(beta):
     """f(k) = (-beta)^k / (2^k * k!) for e^{-beta H}."""
-    return lambda k: (-beta ** k) / ((2**k) * scipy.special.factorial(k))
+    return lambda k:( (-beta) ** k) / ((2**k) * scipy.special.factorial(k))
 
 def f_resolvent(beta):
     """f(k) = beta^k for (I - beta*H)^{-1}. Valid when beta*||H||_2 < 1."""

@@ -23,6 +23,7 @@ python3 -m venv env
 
 ## Getting Started
 All code resides in the `src` folder.  The main file that contains HWE mechanism is in `spin_trace_estimators.py`
+In `spin_trace_estimators.py`, `system.verify` allows one to test the method and compute the relative error.
 
 
 ## Citation
